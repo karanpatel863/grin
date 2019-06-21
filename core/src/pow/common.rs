@@ -14,16 +14,16 @@
 
 //! Common types and traits for cuckoo/cuckatoo family of solvers
 
-use blake2::blake2b::blake2b;
+use crate::blake2::blake2b::blake2b;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 
-use pow::error::{Error, ErrorKind};
-use pow::num::{PrimInt, ToPrimitive};
-use pow::siphash::siphash24;
+use crate::pow::error::{Error, ErrorKind};
+use crate::pow::num::{PrimInt, ToPrimitive};
+use crate::pow::siphash::siphash24;
+use std::fmt;
 use std::hash::Hash;
 use std::io::Cursor;
 use std::ops::{BitOrAssign, Mul};
-use std::{fmt, mem};
 
 /// Operations needed for edge type (going to be u32 or u64)
 pub trait EdgeType: PrimInt + ToPrimitive + Mul + BitOrAssign + Hash {}
@@ -44,7 +44,7 @@ impl<T> fmt::Display for Edge<T>
 where
 	T: EdgeType,
 {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		write!(
 			f,
 			"(u: {}, v: {})",
@@ -68,7 +68,7 @@ impl<T> fmt::Display for Link<T>
 where
 	T: EdgeType,
 {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		write!(
 			f,
 			"(next: {}, to: {})",
@@ -78,17 +78,19 @@ where
 	}
 }
 
-pub fn set_header_nonce(header: Vec<u8>, nonce: Option<u32>) -> Result<[u64; 4], Error> {
-	let len = header.len();
-	let mut header = header.clone();
+pub fn set_header_nonce(header: &[u8], nonce: Option<u32>) -> Result<[u64; 4], Error> {
 	if let Some(n) = nonce {
-		header.truncate(len - mem::size_of::<u32>());
+		let len = header.len();
+		let mut header = header.to_owned();
+		header.truncate(len - 4); // drop last 4 bytes (u32) off the end
 		header.write_u32::<LittleEndian>(n)?;
+		create_siphash_keys(&header)
+	} else {
+		create_siphash_keys(&header)
 	}
-	create_siphash_keys(header)
 }
 
-pub fn create_siphash_keys(header: Vec<u8>) -> Result<[u64; 4], Error> {
+pub fn create_siphash_keys(header: &[u8]) -> Result<[u64; 4], Error> {
 	let h = blake2b(32, &[], &header);
 	let hb = h.as_bytes();
 	let mut rdr = Cursor::new(hb);
@@ -100,7 +102,7 @@ pub fn create_siphash_keys(header: Vec<u8>) -> Result<[u64; 4], Error> {
 	])
 }
 
-/// Macros to clean up integer unwrapping
+/// Macro to clean up u64 unwrapping
 #[macro_export]
 macro_rules! to_u64 {
 	($n:expr) => {
@@ -108,6 +110,7 @@ macro_rules! to_u64 {
 	};
 }
 
+/// Macro to clean up u64 unwrapping as u32
 #[macro_export]
 macro_rules! to_u32 {
 	($n:expr) => {
@@ -115,6 +118,7 @@ macro_rules! to_u32 {
 	};
 }
 
+/// Macro to clean up u64 unwrapping as usize
 #[macro_export]
 macro_rules! to_usize {
 	($n:expr) => {
@@ -122,15 +126,16 @@ macro_rules! to_usize {
 	};
 }
 
+/// Macro to clean up casting to edge type
 #[macro_export]
 macro_rules! to_edge {
-	($n:expr) => {
-		T::from($n).ok_or(ErrorKind::IntegerCast)?
+	($edge_type:ident, $n:expr) => {
+		$edge_type::from($n).ok_or(ErrorKind::IntegerCast)?
 	};
 }
 
 /// Utility struct to calculate commonly used Cuckoo parameters calculated
-/// from header, nonce, sizeshift, etc.
+/// from header, nonce, edge_bits, etc.
 pub struct CuckooParams<T>
 where
 	T: EdgeType,
@@ -139,7 +144,6 @@ where
 	pub proof_size: usize,
 	pub num_edges: u64,
 	pub siphash_keys: [u64; 4],
-	pub easiness: T,
 	pub edge_mask: T,
 }
 
@@ -147,47 +151,22 @@ impl<T> CuckooParams<T>
 where
 	T: EdgeType,
 {
-	/// Instantiates new params and calculate easiness, edge mask, etc
-	pub fn new(
-		edge_bits: u8,
-		proof_size: usize,
-		easiness_pct: u32,
-		cuckatoo: bool,
-	) -> Result<CuckooParams<T>, Error> {
-		let num_edges = 1 << edge_bits;
-		let num_nodes = 2 * num_edges as u64;
-		let easiness = if cuckatoo {
-			to_u64!(easiness_pct) * num_nodes / 100
-		} else {
-			to_u64!(easiness_pct) * num_edges / 100
-		};
-		let edge_mask = if cuckatoo {
-			to_edge!(num_edges - 1)
-		} else {
-			to_edge!(num_edges / 2 - 1)
-		};
+	/// Instantiates new params and calculate edge mask, etc
+	pub fn new(edge_bits: u8, proof_size: usize) -> Result<CuckooParams<T>, Error> {
+		let num_edges = (1 as u64) << edge_bits;
+		let edge_mask = to_edge!(T, num_edges - 1);
 		Ok(CuckooParams {
-			siphash_keys: [0; 4],
-			easiness: to_edge!(easiness),
-			proof_size,
-			edge_mask,
-			num_edges,
 			edge_bits,
+			proof_size,
+			num_edges,
+			siphash_keys: [0; 4],
+			edge_mask,
 		})
 	}
 
 	/// Reset the main keys used for siphash from the header and nonce
-	pub fn reset_header_nonce(
-		&mut self,
-		mut header: Vec<u8>,
-		nonce: Option<u32>,
-	) -> Result<(), Error> {
-		if let Some(n) = nonce {
-			let len = header.len();
-			header.truncate(len - mem::size_of::<u32>());
-			header.write_u32::<LittleEndian>(n)?;
-		}
-		self.siphash_keys = set_header_nonce(header, nonce)?;
+	pub fn reset_header_nonce(&mut self, header: Vec<u8>, nonce: Option<u32>) -> Result<(), Error> {
+		self.siphash_keys = set_header_nonce(&header, nonce)?;
 		Ok(())
 	}
 
@@ -199,7 +178,7 @@ where
 		);
 		let mut masked = hash_u64 & self.edge_mask.to_u64().ok_or(ErrorKind::IntegerCast)?;
 		if shift {
-			masked = masked << 1;
+			masked <<= 1;
 			masked |= uorv;
 		}
 		Ok(T::from(masked).ok_or(ErrorKind::IntegerCast)?)

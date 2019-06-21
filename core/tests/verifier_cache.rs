@@ -12,22 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-extern crate chrono;
-extern crate grin_core;
-extern crate grin_keychain as keychain;
-extern crate grin_util as util;
-extern crate grin_wallet as wallet;
-
-use std::sync::{Arc, RwLock};
-
 pub mod common;
 
-use grin_core::core::verifier_cache::{LruVerifierCache, VerifierCache};
-use grin_core::core::{Output, OutputFeatures};
-use keychain::{ExtKeychain, Keychain};
-use wallet::libtx::proof;
+use self::core::core::verifier_cache::{LruVerifierCache, VerifierCache};
+use self::core::core::{Output, OutputFeatures};
+use self::core::libtx::proof;
+use self::keychain::{ExtKeychain, Keychain};
+use self::util::RwLock;
+use grin_core as core;
+use grin_keychain as keychain;
+use grin_util as util;
+use std::sync::Arc;
 
-fn verifier_cache() -> Arc<RwLock<VerifierCache>> {
+fn verifier_cache() -> Arc<RwLock<dyn VerifierCache>> {
 	Arc::new(RwLock::new(LruVerifierCache::new()))
 }
 
@@ -35,33 +32,33 @@ fn verifier_cache() -> Arc<RwLock<VerifierCache>> {
 fn test_verifier_cache_rangeproofs() {
 	let cache = verifier_cache();
 
-	let keychain = ExtKeychain::from_random_seed().unwrap();
-	let key_id = keychain.derive_key_id(1).unwrap();
+	let keychain = ExtKeychain::from_random_seed(false).unwrap();
+	let key_id = ExtKeychain::derive_key_id(1, 1, 0, 0, 0);
 	let commit = keychain.commit(5, &key_id).unwrap();
 	let proof = proof::create(&keychain, 5, &key_id, commit, None).unwrap();
 
 	let out = Output {
-		features: OutputFeatures::DEFAULT_OUTPUT,
+		features: OutputFeatures::Plain,
 		commit: commit,
 		proof: proof,
 	};
 
 	// Check our output is not verified according to the cache.
 	{
-		let mut cache = cache.write().unwrap();
+		let mut cache = cache.write();
 		let unverified = cache.filter_rangeproof_unverified(&vec![out]);
 		assert_eq!(unverified, vec![out]);
 	}
 
 	// Add our output to the cache.
 	{
-		let mut cache = cache.write().unwrap();
+		let mut cache = cache.write();
 		cache.add_rangeproof_verified(vec![out]);
 	}
 
 	// Check it shows as verified according to the cache.
 	{
-		let mut cache = cache.write().unwrap();
+		let mut cache = cache.write();
 		let unverified = cache.filter_rangeproof_unverified(&vec![out]);
 		assert_eq!(unverified, vec![]);
 	}

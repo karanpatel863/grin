@@ -21,53 +21,50 @@
 #![deny(unused_mut)]
 #![warn(missing_docs)]
 
-extern crate backtrace;
-extern crate base64;
-extern crate byteorder;
-extern crate rand;
 #[macro_use]
-extern crate slog;
-extern crate slog_async;
-extern crate slog_term;
-
+extern crate log;
 #[macro_use]
 extern crate lazy_static;
-
-extern crate serde;
 #[macro_use]
 extern crate serde_derive;
-extern crate walkdir;
-extern crate zip as zip_rs;
+// Re-export so only has to be included once
+pub use parking_lot::Mutex;
+pub use parking_lot::{RwLock, RwLockReadGuard};
 
 // Re-export so only has to be included once
-pub extern crate secp256k1zkp as secp;
+pub use secp256k1zkp as secp;
 
 // Logging related
 pub mod logger;
-pub use logger::{init_logger, init_test_logger, LOGGER};
+pub use crate::logger::{init_logger, init_test_logger};
 
 // Static secp instance
 pub mod secp_static;
-pub use secp_static::static_secp_instance;
+pub use crate::secp_static::static_secp_instance;
 
 pub mod types;
-pub use types::{LogLevel, LoggingConfig};
+pub use crate::types::{LogLevel, LoggingConfig, ZeroingString};
 
 pub mod macros;
 
+// read_exact and write_all impls
+pub mod read_write;
+
 // other utils
-use byteorder::{BigEndian, ByteOrder};
 #[allow(unused_imports)]
 use std::ops::Deref;
-use std::sync::{Arc, RwLock};
-
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 mod hex;
-pub use hex::*;
+pub use crate::hex::*;
 
 /// File util
 pub mod file;
 /// Compress and decompress zip bz2 archives
 pub mod zip;
+
+mod rate_counter;
+pub use crate::rate_counter::RateCounter;
 
 /// Encapsulation of a RwLock<Option<T>> for one-time initialization.
 /// This implementation will purposefully fail hard if not used
@@ -93,7 +90,7 @@ where
 	/// Initializes the OneTime, should only be called once after construction.
 	/// Will panic (via assert) if called more than once.
 	pub fn init(&self, value: T) {
-		let mut inner = self.inner.write().unwrap();
+		let mut inner = self.inner.write();
 		assert!(inner.is_none());
 		*inner = Some(value);
 	}
@@ -101,22 +98,59 @@ where
 	/// Borrows the OneTime, should only be called after initialization.
 	/// Will panic (via expect) if called before initialization.
 	pub fn borrow(&self) -> T {
-		let inner = self.inner.read().unwrap();
+		let inner = self.inner.read();
 		inner
 			.clone()
 			.expect("Cannot borrow one_time before initialization.")
 	}
 }
 
-/// Construct msg bytes from tx fee and lock_height
-pub fn kernel_sig_msg(fee: u64, lock_height: u64) -> [u8; 32] {
-	let mut bytes = [0; 32];
-	BigEndian::write_u64(&mut bytes[16..24], fee);
-	BigEndian::write_u64(&mut bytes[24..], lock_height);
-	bytes
-}
-
 /// Encode an utf8 string to a base64 string
 pub fn to_base64(s: &str) -> String {
 	base64::encode(s)
+}
+
+/// Global stopped/paused state shared across various subcomponents of Grin.
+///
+/// "Stopped" allows a clean shutdown of the Grin server.
+/// "Paused" is used in some tests to allow nodes to reach steady state etc.
+///
+pub struct StopState {
+	stopped: AtomicBool,
+	paused: AtomicBool,
+}
+
+impl StopState {
+	/// Create a new stop_state in default "running" state.
+	pub fn new() -> StopState {
+		StopState {
+			stopped: AtomicBool::new(false),
+			paused: AtomicBool::new(false),
+		}
+	}
+
+	/// Check if we are stopped.
+	pub fn is_stopped(&self) -> bool {
+		self.stopped.load(Ordering::Relaxed)
+	}
+
+	/// Check if we are paused.
+	pub fn is_paused(&self) -> bool {
+		self.paused.load(Ordering::Relaxed)
+	}
+
+	/// Stop the server.
+	pub fn stop(&self) {
+		self.stopped.store(true, Ordering::Relaxed)
+	}
+
+	/// Pause the server (only used in tests).
+	pub fn pause(&self) {
+		self.paused.store(true, Ordering::Relaxed)
+	}
+
+	/// Resume a paused server (only used in tests).
+	pub fn resume(&self) {
+		self.paused.store(false, Ordering::Relaxed)
+	}
 }

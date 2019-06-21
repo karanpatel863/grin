@@ -14,10 +14,10 @@
 
 //! Base types that the block chain pipeline requires.
 
-use core::core::hash::{Hash, Hashed};
-use core::core::{Block, BlockHeader};
-use core::pow::Difficulty;
-use core::ser;
+use crate::core::core::hash::{Hash, Hashed, ZERO_HASH};
+use crate::core::core::{Block, BlockHeader};
+use crate::core::pow::Difficulty;
+use crate::core::ser;
 
 bitflags! {
 /// Options for block validation
@@ -57,30 +57,38 @@ pub struct Tip {
 	pub height: u64,
 	/// Last block pushed to the fork
 	pub last_block_h: Hash,
-	/// Block previous to last
+	/// Previous block
 	pub prev_block_h: Hash,
 	/// Total difficulty accumulated on that fork
 	pub total_difficulty: Difficulty,
 }
 
 impl Tip {
-	/// Creates a new tip at height zero and the provided genesis hash.
-	pub fn new(gbh: Hash) -> Tip {
+	/// Creates a new tip based on provided header.
+	pub fn from_header(header: &BlockHeader) -> Tip {
 		Tip {
-			height: 0,
-			last_block_h: gbh,
-			prev_block_h: gbh,
-			total_difficulty: Difficulty::one(),
+			height: header.height,
+			last_block_h: header.hash(),
+			prev_block_h: header.prev_hash,
+			total_difficulty: header.total_difficulty(),
 		}
 	}
+}
 
-	/// Append a new block to this tip, returning a new updated tip.
-	pub fn from_block(bh: &BlockHeader) -> Tip {
+impl Hashed for Tip {
+	/// The hash of the underlying block.
+	fn hash(&self) -> Hash {
+		self.last_block_h
+	}
+}
+
+impl Default for Tip {
+	fn default() -> Self {
 		Tip {
-			height: bh.height,
-			last_block_h: bh.hash(),
-			prev_block_h: bh.previous,
-			total_difficulty: bh.total_difficulty(),
+			height: 0,
+			last_block_h: ZERO_HASH,
+			prev_block_h: ZERO_HASH,
+			total_difficulty: Difficulty::min(),
 		}
 	}
 }
@@ -96,7 +104,7 @@ impl ser::Writeable for Tip {
 }
 
 impl ser::Readable for Tip {
-	fn read(reader: &mut ser::Reader) -> Result<Tip, ser::Error> {
+	fn read(reader: &mut dyn ser::Reader) -> Result<Tip, ser::Error> {
 		let height = reader.read_u64()?;
 		let last = Hash::read(reader)?;
 		let prev = Hash::read(reader)?;
@@ -116,7 +124,7 @@ impl ser::Readable for Tip {
 pub trait ChainAdapter {
 	/// The blockchain pipeline has accepted this block as valid and added
 	/// it to our chain.
-	fn block_accepted(&self, b: &Block, opts: Options);
+	fn block_accepted(&self, block: &Block, status: BlockStatus, opts: Options);
 }
 
 /// Inform the caller of the current status of a txhashset write operation,
@@ -149,5 +157,17 @@ impl TxHashsetWriteStatus for NoStatus {
 pub struct NoopAdapter {}
 
 impl ChainAdapter for NoopAdapter {
-	fn block_accepted(&self, _: &Block, _: Options) {}
+	fn block_accepted(&self, _b: &Block, _status: BlockStatus, _opts: Options) {}
+}
+
+/// Status of an accepted block.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BlockStatus {
+	/// Block is the "next" block, updating the chain head.
+	Next,
+	/// Block does not update the chain head and is a fork.
+	Fork,
+	/// Block updates the chain head via a (potentially disruptive) "reorg".
+	/// Previous block was not our previous chain head.
+	Reorg(u64),
 }

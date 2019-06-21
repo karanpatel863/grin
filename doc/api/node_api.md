@@ -9,7 +9,7 @@
 1. [Chain Endpoint](#chain-endpoint)
     1. [GET Chain](#get-chain)
     1. [POST Chain Compact](#post-chain-compact)
-    1. [POST Chain Validate](#post-chain-validate)
+    1. [GET Chain Validate](#get-chain-validate)
     1. [GET Chain Outputs by IDs](#get-chain-outputs-by-ids)
     1. [GET Chain Outputs by Height](#get-chain-outputs-by-height)
 1. [Status Endpoint](#status-endpoint)
@@ -40,9 +40,9 @@ Optionally return results as "compact blocks" by passing `?compact` query.
 
 * **URL**
 
-  /v1/blocks/hash
-  /v1/blocks/height
-  /v1/blocks/commit
+  * /v1/blocks/hash
+  * /v1/blocks/height
+  * /v1/blocks/commit
 
 * **Method:**
 
@@ -73,14 +73,16 @@ Optionally return results as "compact blocks" by passing `?compact` query.
     | - version             | number   | Version of the block                                                        |
     | - height              | number   | Height of this block since the genesis block (height 0)                     |
     | - previous            | string   | Hash of the block previous to this in the chain                             |
+    | - prev_root           | string   | Root hash of the header MMR at the previous header                          |
     | - timestamp           | string   | RFC3339 timestamp at which the block was built                              |
     | - output_root         | string   | Merklish root of all the commitments in the TxHashSet                       |
     | - range_proof_root    | string   | Merklish root of all range proofs in the TxHashSet                          |
     | - kernel_root         | string   | Merklish root of all transaction kernels in the TxHashSet                   |
     | - nonce               | number   | Nonce increment used to mine this block                                     |
-    | - cuckoo_size         | number   | Size of the cuckoo graph                                                    |
+    | - edge_bits           | number   | Size of the cuckoo graph (2_log of number of edges)                         |
     | - cuckoo_solution     | []number | The Cuckoo solution for this block                                          |
     | - total_difficulty    | number   | Total accumulated difficulty since genesis block                            |
+    | - secondary_scaling   | number   | Variable difficulty scaling factor for secondary proof of work              |
     | - total_kernel_offset | string   | Total kernel offset since genesis block                                     |
     | inputs                | []string | Input transactions                                                          |
     | outputs               | []object | Outputs transactions                                                        |
@@ -125,9 +127,9 @@ Returns data about a block headers given either a hash or height or an output co
 
 * **URL**
 
-  /v1/headers/hash
-  /v1/headers/height
-  /v1/headers/commit
+  * /v1/headers/hash
+  * /v1/headers/height
+  * /v1/headers/commit
 
 * **Method:**
 
@@ -158,12 +160,13 @@ Returns data about a block headers given either a hash or height or an output co
     | - version             | number   | Version of the block                                                        |
     | - height              | number   | Height of this block since the genesis block (height 0)                     |
     | - previous            | string   | Hash of the block previous to this in the chain                             |
+    | - prev_root           | string   | Root hash of the header MMR at the previous header                          |
     | - timestamp           | string   | RFC3339 timestamp at which the block was built                              |
     | - output_root         | string   | Merklish root of all the commitments in the TxHashSet                       |
     | - range_proof_root    | string   | Merklish root of all range proofs in the TxHashSet                          |
     | - kernel_root         | string   | Merklish root of all transaction kernels in the TxHashSet                   |
     | - nonce               | number   | Nonce increment used to mine this block                                     |
-    | - cuckoo_size         | number   | Size of the cuckoo graph                                                    |
+    | - edge_bits           | number   | Size of the cuckoo graph (2_log of number of edges)                         |
     | - cuckoo_solution     | []number | The Cuckoo solution for this block                                          |
     | - total_difficulty    | number   | Total accumulated difficulty since genesis block                            |
     | - total_kernel_offset | string   | Total kernel offset since genesis block                                     |
@@ -279,7 +282,7 @@ Trigger a compaction of the chain state to regain storage space.
     });
   ```
 
-### POST Chain Validate
+### GET Chain Validate
 
 Trigger a validation of the chain state.
 
@@ -289,7 +292,7 @@ Trigger a validation of the chain state.
 
 * **Method:**
 
-  `POST`
+  `GET`
   
 * **URL Params**
 
@@ -313,7 +316,7 @@ Trigger a validation of the chain state.
     $.ajax({
       url: "/v1/chain/validate",
       dataType: "json",
-      type : "POST",
+      type : "GET",
       success : function(r) {
         console.log(r);
       }
@@ -326,9 +329,9 @@ Retrieves details about specifics outputs. Supports retrieval of multiple output
 
 * **URL**
 
-  /v1/chain/outputs/byids?id=x
-  /v1/chain/outputs/byids?id=x,y,z
-  /v1/chain/outputs/byids?id=x&id=y&id=z
+  * /v1/chain/outputs/byids?id=x
+  * /v1/chain/outputs/byids?id=x,y,z
+  * /v1/chain/outputs/byids?id=x&id=y&id=z
 
 * **Method:**
 
@@ -549,8 +552,8 @@ Retrieves the last n outputs inserted into the tree.
 
 * **URL**
 
-/v1/txhashset/lastoutputs (gets last 10)
-/v1/txhashset/lastoutputs?n=x
+  * /v1/txhashset/lastoutputs (gets last 10)
+  * /v1/txhashset/lastoutputs?n=x
 
 * **Method:**
 
@@ -599,8 +602,8 @@ Retrieves the last n rangeproofs inserted in to the tree.
 
 * **URL**
 
-/v1/txhashset/lastrangeproofs (gets last 10)
-/v1/txhashset/lastrangeproofs?n=x
+  * /v1/txhashset/lastrangeproofs (gets last 10)
+  * /v1/txhashset/lastrangeproofs?n=x
 
 * **Method:**
 
@@ -649,8 +652,8 @@ Retrieves the last n kernels inserted in to the tree.
 
 * **URL**
 
-/v1/txhashset/lastkernels (gets last 10)
-/v1/txhashset/lastkernels?n=x
+  * /v1/txhashset/lastkernels (gets last 10)
+  * /v1/txhashset/lastkernels?n=x
 
 * **Method:**
 
@@ -763,7 +766,7 @@ Build a merkle proof for a given output id and return a dummy output with merkle
 
 * **URL**
 
-  /v1/txhashset/merkleproof?n=x
+  /v1/txhashset/merkleproof?id=x
 
 * **Method:**
 
@@ -772,7 +775,7 @@ Build a merkle proof for a given output id and return a dummy output with merkle
 * **URL Params**
 
   **Required:**
-  `n=[string]`
+  `id=[string]`
 
 * **Data Params**
 
@@ -802,7 +805,7 @@ Build a merkle proof for a given output id and return a dummy output with merkle
 
   ```javascript
     $.ajax({
-      url: "/v1/txhashset/merkleproof?n=0803516094a30830ed9fedff1c63251b51703ddffbb73f944d9e33e8fa5d17444f",
+      url: "/v1/txhashset/merkleproof?id=0803516094a30830ed9fedff1c63251b51703ddffbb73f944d9e33e8fa5d17444f",
       dataType: "json",
       type : "GET",
       success : function(r) {

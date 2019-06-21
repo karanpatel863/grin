@@ -21,29 +21,21 @@
 #![deny(unused_mut)]
 #![warn(missing_docs)]
 
+use blake2_rfc as blake2;
 #[macro_use]
-extern crate bitflags;
-extern crate blake2_rfc as blake2;
-extern crate byteorder;
-extern crate croaring;
-extern crate grin_keychain as keychain;
-extern crate grin_util as util;
+extern crate enum_primitive;
+use grin_keychain as keychain;
+use grin_util as util;
 #[macro_use]
 extern crate lazy_static;
-extern crate lru_cache;
-extern crate num_bigint as bigint;
-extern crate rand;
-extern crate serde;
 #[macro_use]
 extern crate serde_derive;
-extern crate siphasher;
+extern crate serde;
 #[macro_use]
-extern crate slog;
-extern crate chrono;
-extern crate failure;
+extern crate log;
+use failure;
 #[macro_use]
 extern crate failure_derive;
-
 #[macro_use]
 pub mod macros;
 
@@ -51,5 +43,6 @@ pub mod consensus;
 pub mod core;
 pub mod genesis;
 pub mod global;
+pub mod libtx;
 pub mod pow;
 pub mod ser;

@@ -7,11 +7,14 @@
     1. [GET Retrieve Summary Info](#get-retrieve-summary-info)
     1. [GET Node Height](#get-node-height)
     1. [GET Retrieve Txs](#get-retrieve-txs)
-    1. [GET Dump Stored Tx](#get-dump-stored-tx)
+    1. [GET Retrieve Stored Tx](#get-retrieve-stored-tx)
     1. [POST Issue Send Tx](#post-issue-send-tx)
     1. [POST Finalize Tx](#post-finalize-tx)
     1. [POST Cancel Tx](#post-cancel-tx)
+    1. [POST Post Tx](#post-post-tx)
+    1. [POST Repost Tx](#post-repost-tx)
     1. [POST Issue Burn Tx](#post-issue-burn-tx)
+    1. [Adding Foreign API Endpoints](#add-foreign-api-endpoints)
 
 ## Wallet Owner Endpoint
 
@@ -21,9 +24,8 @@ Attempt to update and retrieve outputs.
 
 * **URL**
 
-  /v1/wallet/owner/retrieve_outputs
-  or
-  /v1/wallet/owner/retrieve_outputs?refresh&show_spent&tx_id=x&tx_id=y
+  * /v1/wallet/owner/retrieve_outputs
+  * /v1/wallet/owner/retrieve_outputs?refresh&show_spent&tx_id=x&tx_id=y
 
 * **Method:**
 
@@ -86,8 +88,8 @@ Attempt to update and retrieve outputs.
 
 * **URL**
 
-  /v1/wallet/owner/retrieve_summary_info
-  /v1/wallet/owner/retrieve_summary_info?refresh
+  * /v1/wallet/owner/retrieve_summary_info
+  * /v1/wallet/owner/retrieve_summary_info?refresh
 
 * **Method:**
 
@@ -106,7 +108,7 @@ Attempt to update and retrieve outputs.
 * **Success Response:**
 
   * **Code:** 200
-  * **Content:** Array of
+  * **Content:** All listed amounts in nanogrin. Array of
 
     | Field                             | Type     | Description                             |
     |:----------------------------------|:---------|:----------------------------------------|
@@ -190,9 +192,9 @@ Return whether the outputs were validated against a node and an array of TxLogEn
 
 * **URL**
 
-  /v1/wallet/owner/retrieve_txs
-  or
-  /v1/wallet/owner/retrieve_txs?refresh?id=x
+  * /v1/wallet/owner/retrieve_txs
+  * /v1/wallet/owner/retrieve_txs?refresh&id=x
+  * /v1/wallet/owner/retrieve_txs?tx_id=x
 
 * **Method:**
 
@@ -202,8 +204,9 @@ Return whether the outputs were validated against a node and an array of TxLogEn
 
   **Optional:**
 
-  `refresh` to refresh from node
-  `tx_id=[number]` to retrieve only the specified output
+  * `refresh` to refresh from node
+  * `id=[number]` to retrieve only the specified output by id
+  * `tx_id=[string]` to retrieve only the specified output by tx id
 
 * **Data Params**
 
@@ -251,13 +254,13 @@ Return whether the outputs were validated against a node and an array of TxLogEn
     });
   ```
 
-### GET Dump Stored Tx
+### GET Retrieve Stored Tx
 
 Retrieves a given transaction.
 
 * **URL**
 
-  /v1/wallet/owner/dump_stored_tx?id=x
+  /v1/wallet/owner/retrieve_stored_tx?id=x
 
 * **Method:**
 
@@ -307,7 +310,7 @@ Retrieves a given transaction.
 
   ```javascript
     $.ajax({
-      url: "/v1/wallet/owner/dump_stored_tx?id=13",
+      url: "/v1/wallet/owner/retrieve_stored_tx?id=13",
       dataType: "json",
       type : "GET",
       success : function(r) {
@@ -338,14 +341,13 @@ Send a transaction either directly by http or file (then display the slate)
 
     | Field                         | Type     | Description                          |
     |:------------------------------|:---------|:-------------------------------------|
-    | amount                        | number   | Amount to send                       |
+    | amount                        | number   | Amount to send (in nanogrin)         |
     | minimum_confirmations         | number   | Minimum confirmations                |
     | method                        | string   | Payment method                       |
     | dest                          | string   | Destination url                      |
     | max_outputs                   | number   | Max number of outputs                |
     | num_change_outputs            | number   | Number of change outputs to generate |
     | selection_strategy_is_use_all | bool     | Whether to use all outputs (combine) |
-    | fluff                         | bool     | Dandelion control                    |
 
 * **Success Response:**
 
@@ -392,10 +394,6 @@ Send a transaction either directly by http or file (then display the slate)
 * **Sample Call:**
 
   ```javascript
-    var coinbase_data = {
-      fees: 0,
-      height: 123456
-    }
     $.ajax({
       url: "/v1/wallet/owner/issue_send_tx",
       dataType: "json",
@@ -412,7 +410,7 @@ Send a transaction either directly by http or file (then display the slate)
 ### POST Finalize Tx
 
 Sender finalization of the transaction. Takes the slate returned by the sender as well as the private file generate on the first send step.
-Builds the complete transaction and sends it to a grin node for propagation.
+Builds the complete transaction but will **not** sends it to a grin node for propagation. Use [POST Post Tx](#post-post-tx) for that.
 
 * **URL**
 
@@ -508,10 +506,6 @@ Builds the complete transaction and sends it to a grin node for propagation.
 * **Sample Call:**
 
   ```javascript
-    var coinbase_data = {
-      fees: 0,
-      height: 123456
-    }
     $.ajax({
       url: "/v1/wallet/owner/finalize_tx",
       dataType: "json",
@@ -531,7 +525,8 @@ Roll back a transaction and all associated outputs with a given transaction id T
 
 * **URL**
 
-  /v1/wallet/owner/cancel_tx?id=x
+  * /v1/wallet/owner/cancel_tx?id=x
+  * /v1/wallet/owner/cancel_tx?tx_id=x
 
 * **Method:**
 
@@ -540,7 +535,8 @@ Roll back a transaction and all associated outputs with a given transaction id T
 * **URL Params**
 
   **Required:**
-  `id=[number]`
+  * `id=[number]` the transaction id
+  * `tx_id=[string]`the transaction slate id
 
 * **Data Params**
 
@@ -557,12 +553,132 @@ Roll back a transaction and all associated outputs with a given transaction id T
 * **Sample Call:**
 
   ```javascript
-    var coinbase_data = {
-      fees: 0,
-      height: 123456
-    }
     $.ajax({
       url: "/v1/wallet/owner/cancel_tx?id=3",
+      dataType: "json",
+      type : "POST",
+      success : function(r) {
+        console.log(r);
+      }
+    });
+  ```
+
+### POST Post Tx
+
+Push new transaction to the connected node transaction pool. Add `?fluff` at the end of the URL to bypass Dandelion relay.
+
+* **URL**
+
+  * /v1/wallet/owner/post_tx
+  * /v1/wallet/owner/post_tx?fluff
+
+* **Method:**
+
+  `POST`
+  
+* **URL Params**
+
+   **Optional:**
+
+  `fluff` to bypass Dandelion relay
+
+* **Data Params**
+
+  **Required:** A transaction slate in JSON.
+
+    | Field                 | Type     | Description                                                               |
+    |:----------------------|:---------|:--------------------------------------------------------------------------|
+    | num_participants      | number   | The number of participants intended to take part in this transaction      |
+    | id                    | number   | Unique transaction ID, selected by sender                                 |
+    | tx                    | object   | The core transaction data (inputs, outputs, kernels and kernel offset)    |
+    | - offset              | []number | The kernel "offset" k2, excess is k1G after splitting the key k = k1 + k2 |
+    | - body                | object   | The transaction body - inputs/outputs/kernels                             |
+    | - - inputs            | []object | List of inputs spent by the transaction                                   |
+    | - - - features        | object   | The features of the output being spent                                    |
+    | - - - - bits          | number   | Representation of the features in bits                                    |
+    | - - - commit          | []number | The commit referencing the output being spent                             |
+    | - - outputs           | []object | List of outputs the transaction produces                                  |
+    | - - - features        | object   | Options for an output's structure or use                                  |
+    | - - - - bits          | number   | Representation of the features in bits                                    |
+    | - - - commit          | []number | The homomorphic commitment representing the output amount                 |
+    | - - - proof           | []number | A proof that the commitment is in the right range                         |
+    | - - kernels           | []object | List of kernels that make up this transaction (usually a single kernel)   |
+    | - - - features        | object   | Options for a kernel's structure or use                                   |
+    | - - - - bits          | number   | Representation of the features in bits                                    |
+    | - - - fee             | number   | Fee originally included in the transaction this proof is for              |
+    | - - - lock_height     | number   | The max lock_height of all inputs to this transaction                     |
+    | - - - excess          | []number | Remainder of the sum of all transaction commitments                       |
+    | - - - excess_sig      | []number | The signature proving the excess is a valid public key (signs the tx fee) |
+    | amount                | number   | Base amount (excluding fee)                                               |
+    | fee                   | number   | Fee amount                                                                |
+    | height                | number   | Block height for the transaction                                          |
+    | lock_height           | number   | Lock height                                                               |
+    | participant_data      | object   | Participant data                                                          |
+    | - id                  | number   | Id of participant in the transaction. (For now, 0=sender, 1=rec)          |
+    | - public_blind_excess | []number | Public key corresponding to private blinding factor                       |
+    | - public_nonce        | []number | Public key corresponding to private nonce                                 |
+    | - part_sig            | []number | Public partial signature                                                  |
+
+* **Success Response:**
+
+  * **Code:** 200
+
+* **Error Response:**
+
+  * **Code:** 400
+
+* **Sample Call:**
+
+  ```javascript
+    $.ajax({
+      url: "/v1/wallet/owner/post_tx",
+      dataType: "json",
+      type : "POST",
+      success : function(r) {
+        console.log(r);
+      },
+      data: {
+        file: tx.json
+      },
+    });
+  ```
+### POST Repost Tx
+
+Repost a `sending` transaction to the connected node transaction pool with a given transaction id. Add `?fluff` at the end of the URL to bypass Dandelion relay . This could be used for retry posting when a `sending` transaction is created but somehow failed on posting.
+
+* **URL**
+
+  * /v1/wallet/owner/repost?id=x
+  * /v1/wallet/owner/repost?tx_id=x
+  * /v1/wallet/owner/repost?fluff&tx_id=x
+
+* **Method:**
+
+  `POST`
+  
+* **URL Params**
+
+  **Required:**
+  * `id=[number]` the transaction id
+  * `tx_id=[string]`the transaction slate id
+
+* **Data Params**
+
+  None
+
+* **Success Response:**
+
+  * **Code:** 200
+
+* **Error Response:**
+
+  * **Code:** 400
+
+* **Sample Call:**
+
+  ```javascript
+    $.ajax({
+      url: "/v1/wallet/owner/repost?id=3",
       dataType: "json",
       type : "POST",
       success : function(r) {
@@ -602,10 +718,6 @@ Issue a burn TX.
 * **Sample Call:**
 
   ```javascript
-    var coinbase_data = {
-      fees: 0,
-      height: 123456
-    }
     $.ajax({
       url: "/v1/wallet/owner/issue_burn_tx",
       dataType: "json",
@@ -615,3 +727,7 @@ Issue a burn TX.
       }
     });
   ```
+
+### Add Foreign API Endpoints
+
+For some environments it may be convenient to have the [wallet foreign API](wallet_foreign_api.md) available on the same port as the owner API.  You can do so by setting the `owner_api_include_foreign` configuration setting to `true`.

@@ -1,11 +1,10 @@
-extern crate grin_api as api;
-extern crate grin_util as util;
-extern crate hyper;
+use grin_api as api;
+use grin_util as util;
 
-use api::*;
-use hyper::{Body, Request};
+use crate::api::*;
+use hyper::{Body, Request, StatusCode};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::{thread, time};
 
@@ -28,7 +27,7 @@ pub struct CounterMiddleware {
 impl CounterMiddleware {
 	fn new() -> CounterMiddleware {
 		CounterMiddleware {
-			counter: ATOMIC_USIZE_INIT,
+			counter: AtomicUsize::new(0),
 		}
 	}
 
@@ -41,10 +40,13 @@ impl Handler for CounterMiddleware {
 	fn call(
 		&self,
 		req: Request<Body>,
-		mut handlers: Box<Iterator<Item = HandlerObj>>,
+		mut handlers: Box<dyn Iterator<Item = HandlerObj>>,
 	) -> ResponseFuture {
 		self.counter.fetch_add(1, Ordering::SeqCst);
-		handlers.next().unwrap().call(req, handlers)
+		match handlers.next() {
+			Some(h) => h.call(req, handlers),
+			None => return response(StatusCode::INTERNAL_SERVER_ERROR, "no handler found"),
+		}
 	}
 }
 
@@ -71,9 +73,9 @@ fn test_start_api() {
 	let addr: SocketAddr = server_addr.parse().expect("unable to parse server address");
 	assert!(server.start(addr, router, None).is_ok());
 	let url = format!("http://{}/v1/", server_addr);
-	let index = api::client::get::<Vec<String>>(url.as_str(), None).unwrap();
-	//	assert_eq!(index.len(), 2);
-	//	assert_eq!(counter.value(), 1);
+	let index = request_with_retry(url.as_str()).unwrap();
+	assert_eq!(index.len(), 2);
+	assert_eq!(counter.value(), 1);
 	assert!(server.stop());
 	thread::sleep(time::Duration::from_millis(1_000));
 }
@@ -95,7 +97,22 @@ fn test_start_api_tls() {
 	let server_addr = "0.0.0.0:14444";
 	let addr: SocketAddr = server_addr.parse().expect("unable to parse server address");
 	assert!(server.start(addr, router, Some(tls_conf)).is_ok());
-	let index = api::client::get::<Vec<String>>("https://yourdomain.com:14444/v1/", None).unwrap();
+	let index = request_with_retry("https://yourdomain.com:14444/v1/").unwrap();
 	assert_eq!(index.len(), 2);
 	assert!(!server.stop());
+}
+
+fn request_with_retry(url: &str) -> Result<Vec<String>, api::Error> {
+	let mut tries = 0;
+	loop {
+		let res = api::client::get::<Vec<String>>(url, None);
+		if res.is_ok() {
+			return res;
+		}
+		if tries > 5 {
+			return res;
+		}
+		tries += 1;
+		thread::sleep(time::Duration::from_millis(500));
+	}
 }

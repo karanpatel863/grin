@@ -14,6 +14,7 @@
 
 use rand::thread_rng;
 use std::cmp::min;
+use std::io::Cursor;
 use std::ops::Add;
 /// Keychain trait and its main supporting types. The Identifier is a
 /// semi-opaque structure (just bytes) to track keys within the Keychain.
@@ -21,30 +22,41 @@ use std::ops::Add;
 /// commitment generation.
 use std::{error, fmt};
 
-use blake2::blake2b::blake2b;
-use serde::{de, ser};
+use crate::blake2::blake2b::blake2b;
+use crate::extkey_bip32::{self, ChildNumber};
+use serde::{de, ser}; //TODO: Convert errors to use ErrorKind
 
-use util;
-use util::secp::constants::SECRET_KEY_SIZE;
-use util::secp::key::{PublicKey, SecretKey};
-use util::secp::pedersen::Commitment;
-use util::secp::{self, Message, Secp256k1, Signature};
-use util::static_secp_instance;
+use crate::util;
+use crate::util::secp::constants::SECRET_KEY_SIZE;
+use crate::util::secp::key::{PublicKey, SecretKey};
+use crate::util::secp::pedersen::Commitment;
+use crate::util::secp::{self, Message, Secp256k1, Signature};
+use crate::util::static_secp_instance;
+use zeroize::Zeroize;
+
+use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 
 // Size of an identifier in bytes
-pub const IDENTIFIER_SIZE: usize = 10;
+pub const IDENTIFIER_SIZE: usize = 17;
 
-#[derive(PartialEq, Eq, Clone, Debug)]
+#[derive(PartialEq, Eq, Clone, Debug, Serialize, Deserialize)]
 pub enum Error {
 	Secp(secp::Error),
-	KeyDerivation(String),
+	KeyDerivation(extkey_bip32::Error),
 	Transaction(String),
 	RangeProof(String),
+	SwitchCommitment,
 }
 
 impl From<secp::Error> for Error {
 	fn from(e: secp::Error) -> Error {
 		Error::Secp(e)
+	}
+}
+
+impl From<extkey_bip32::Error> for Error {
+	fn from(e: extkey_bip32::Error) -> Error {
+		Error::KeyDerivation(e)
 	}
 }
 
@@ -57,7 +69,7 @@ impl error::Error for Error {
 }
 
 impl fmt::Display for Error {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match *self {
 			_ => write!(f, "some kind of keychain error"),
 		}
@@ -90,7 +102,7 @@ struct IdentifierVisitor;
 impl<'de> de::Visitor<'de> for IdentifierVisitor {
 	type Value = Identifier;
 
-	fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+	fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
 		formatter.write_str("an identifier")
 	}
 
@@ -108,6 +120,49 @@ impl Identifier {
 		Identifier::from_bytes(&[0; IDENTIFIER_SIZE])
 	}
 
+	pub fn from_path(path: &ExtKeychainPath) -> Identifier {
+		path.to_identifier()
+	}
+
+	pub fn to_path(&self) -> ExtKeychainPath {
+		ExtKeychainPath::from_identifier(&self)
+	}
+
+	pub fn to_value_path(&self, value: u64) -> ValueExtKeychainPath {
+		ValueExtKeychainPath {
+			value,
+			ext_keychain_path: self.to_path(),
+		}
+	}
+
+	/// output the path itself, for insertion into bulletproof
+	/// recovery processes can grind through possiblities to find the
+	/// correct length if required
+	pub fn serialize_path(&self) -> [u8; IDENTIFIER_SIZE - 1] {
+		let mut retval = [0u8; IDENTIFIER_SIZE - 1];
+		retval.copy_from_slice(&self.0[1..IDENTIFIER_SIZE]);
+		retval
+	}
+
+	/// restore from a serialized path
+	pub fn from_serialized_path(len: u8, p: &[u8]) -> Identifier {
+		let mut id = [0; IDENTIFIER_SIZE];
+		id[0] = len;
+		for i in 1..IDENTIFIER_SIZE {
+			id[i] = p[i - 1];
+		}
+		Identifier(id)
+	}
+
+	/// Return the parent path
+	pub fn parent_path(&self) -> Identifier {
+		let mut p = ExtKeychainPath::from_identifier(&self);
+		if p.depth > 0 {
+			p.path[p.depth as usize - 1] = ChildNumber::from(0);
+			p.depth = p.depth - 1;
+		}
+		Identifier::from_path(&p)
+	}
 	pub fn from_bytes(bytes: &[u8]) -> Identifier {
 		let mut identifier = [0; IDENTIFIER_SIZE];
 		for i in 0..min(IDENTIFIER_SIZE, bytes.len()) {
@@ -142,6 +197,15 @@ impl Identifier {
 	pub fn to_hex(&self) -> String {
 		util::to_hex(self.0.to_vec())
 	}
+
+	pub fn to_bip_32_string(&self) -> String {
+		let p = ExtKeychainPath::from_identifier(&self);
+		let mut retval = String::from("m");
+		for i in 0..p.depth {
+			retval.push_str(&format!("/{}", <u32>::from(p.path[i as usize])));
+		}
+		retval
+	}
 }
 
 impl AsRef<[u8]> for Identifier {
@@ -151,25 +215,26 @@ impl AsRef<[u8]> for Identifier {
 }
 
 impl ::std::fmt::Debug for Identifier {
-	fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
-		try!(write!(f, "{}(", stringify!(Identifier)));
-		try!(write!(f, "{}", self.to_hex()));
+	fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+		r#try!(write!(f, "{}(", stringify!(Identifier)));
+		r#try!(write!(f, "{}", self.to_hex()));
 		write!(f, ")")
 	}
 }
 
 impl fmt::Display for Identifier {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		write!(f, "{}", self.to_hex())
 	}
 }
 
-#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Default, Clone, PartialEq, Serialize, Deserialize, Zeroize)]
 pub struct BlindingFactor([u8; SECRET_KEY_SIZE]);
 
+// Dummy `Debug` implementation that prevents secret leakage.
 impl fmt::Debug for BlindingFactor {
-	fn fmt(&self, f: &mut ::std::fmt::Formatter) -> fmt::Result {
-		write!(f, "{}", self.to_hex())
+	fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "BlindingFactor(<secret key hidden>)")
 	}
 }
 
@@ -189,7 +254,7 @@ impl Add for BlindingFactor {
 	//
 	fn add(self, other: BlindingFactor) -> Self::Output {
 		let secp = static_secp_instance();
-		let secp = secp.lock().unwrap();
+		let secp = secp.lock();
 		let keys = vec![self, other]
 			.into_iter()
 			.filter(|x| *x != BlindingFactor::zero())
@@ -272,8 +337,8 @@ pub struct SplitBlindingFactor {
 /// factor as well as the "sign" with which they should be combined.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BlindSum {
-	pub positive_key_ids: Vec<Identifier>,
-	pub negative_key_ids: Vec<Identifier>,
+	pub positive_key_ids: Vec<ValueExtKeychainPath>,
+	pub negative_key_ids: Vec<ValueExtKeychainPath>,
 	pub positive_blinding_factors: Vec<BlindingFactor>,
 	pub negative_blinding_factors: Vec<BlindingFactor>,
 }
@@ -289,13 +354,13 @@ impl BlindSum {
 		}
 	}
 
-	pub fn add_key_id(mut self, key_id: Identifier) -> BlindSum {
-		self.positive_key_ids.push(key_id);
+	pub fn add_key_id(mut self, path: ValueExtKeychainPath) -> BlindSum {
+		self.positive_key_ids.push(path);
 		self
 	}
 
-	pub fn sub_key_id(mut self, key_id: Identifier) -> BlindSum {
-		self.negative_key_ids.push(key_id);
+	pub fn sub_key_id(mut self, path: ValueExtKeychainPath) -> BlindSum {
+		self.negative_key_ids.push(path);
 		self
 	}
 
@@ -312,17 +377,103 @@ impl BlindSum {
 	}
 }
 
+/// Encapsulates a max 4-level deep BIP32 path, which is the most we can
+/// currently fit into a rangeproof message. The depth encodes how far the
+/// derivation depths go and allows differentiating paths. As m/0, m/0/0
+/// or m/0/0/0/0 result in different derivations, a path needs to encode
+/// its maximum depth.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Deserialize)]
+pub struct ExtKeychainPath {
+	pub depth: u8,
+	pub path: [extkey_bip32::ChildNumber; 4],
+}
+
+impl ExtKeychainPath {
+	/// Return a new chain path with given derivation and depth
+	pub fn new(depth: u8, d0: u32, d1: u32, d2: u32, d3: u32) -> ExtKeychainPath {
+		ExtKeychainPath {
+			depth: depth,
+			path: [
+				ChildNumber::from(d0),
+				ChildNumber::from(d1),
+				ChildNumber::from(d2),
+				ChildNumber::from(d3),
+			],
+		}
+	}
+
+	/// from an Indentifier [manual deserialization]
+	pub fn from_identifier(id: &Identifier) -> ExtKeychainPath {
+		let mut rdr = Cursor::new(id.0.to_vec());
+		ExtKeychainPath {
+			depth: rdr.read_u8().unwrap(),
+			path: [
+				ChildNumber::from(rdr.read_u32::<BigEndian>().unwrap()),
+				ChildNumber::from(rdr.read_u32::<BigEndian>().unwrap()),
+				ChildNumber::from(rdr.read_u32::<BigEndian>().unwrap()),
+				ChildNumber::from(rdr.read_u32::<BigEndian>().unwrap()),
+			],
+		}
+	}
+
+	/// to an Identifier [manual serialization]
+	pub fn to_identifier(&self) -> Identifier {
+		let mut wtr = vec![];
+		wtr.write_u8(self.depth).unwrap();
+		wtr.write_u32::<BigEndian>(<u32>::from(self.path[0]))
+			.unwrap();
+		wtr.write_u32::<BigEndian>(<u32>::from(self.path[1]))
+			.unwrap();
+		wtr.write_u32::<BigEndian>(<u32>::from(self.path[2]))
+			.unwrap();
+		wtr.write_u32::<BigEndian>(<u32>::from(self.path[3]))
+			.unwrap();
+		let mut retval = [0u8; IDENTIFIER_SIZE];
+		retval.copy_from_slice(&wtr[0..IDENTIFIER_SIZE]);
+		Identifier(retval)
+	}
+
+	/// Last part of the path (for last n_child)
+	pub fn last_path_index(&self) -> u32 {
+		if self.depth == 0 {
+			0
+		} else {
+			<u32>::from(self.path[self.depth as usize - 1])
+		}
+	}
+}
+
+/// Wrapper for amount + path
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Deserialize)]
+pub struct ValueExtKeychainPath {
+	pub value: u64,
+	pub ext_keychain_path: ExtKeychainPath,
+}
+
 pub trait Keychain: Sync + Send + Clone {
-	fn from_seed(seed: &[u8]) -> Result<Self, Error>;
-	fn from_random_seed() -> Result<Self, Error>;
-	fn root_key_id(&self) -> Identifier;
-	fn derive_key_id(&self, derivation: u32) -> Result<Identifier, Error>;
-	fn derived_key(&self, key_id: &Identifier) -> Result<SecretKey, Error>;
-	fn commit(&self, amount: u64, key_id: &Identifier) -> Result<Commitment, Error>;
-	fn commit_with_key_index(&self, amount: u64, derivation: u32) -> Result<Commitment, Error>;
+	/// Generates a keychain from a raw binary seed (which has already been
+	/// decrypted if applicable).
+	fn from_seed(seed: &[u8], is_floo: bool) -> Result<Self, Error>;
+
+	/// Generates a keychain from a list of space-separated mnemonic words
+	fn from_mnemonic(word_list: &str, extension_word: &str, is_floo: bool) -> Result<Self, Error>;
+
+	/// Generates a keychain from a randomly generated seed. Mostly used for tests.
+	fn from_random_seed(is_floo: bool) -> Result<Self, Error>;
+
+	/// Root identifier for that keychain
+	fn root_key_id() -> Identifier;
+
+	/// Derives a key id from the depth of the keychain and the values at each
+	/// depth level. See `KeychainPath` for more information.
+	fn derive_key_id(depth: u8, d1: u32, d2: u32, d3: u32, d4: u32) -> Identifier;
+	fn derive_key(&self, amount: u64, id: &Identifier) -> Result<SecretKey, Error>;
+	fn commit(&self, amount: u64, id: &Identifier) -> Result<Commitment, Error>;
 	fn blind_sum(&self, blind_sum: &BlindSum) -> Result<BlindingFactor, Error>;
-	fn sign(&self, msg: &Message, key_id: &Identifier) -> Result<Signature, Error>;
-	fn sign_with_blinding(&self, &Message, &BlindingFactor) -> Result<Signature, Error>;
+	fn create_nonce(&self, commit: &Commitment) -> Result<SecretKey, Error>;
+	fn sign(&self, msg: &Message, amount: u64, id: &Identifier) -> Result<Signature, Error>;
+	fn sign_with_blinding(&self, _: &Message, _: &BlindingFactor) -> Result<Signature, Error>;
+	fn set_use_switch_commits(&mut self, value: bool);
 	fn secp(&self) -> &Secp256k1;
 }
 
@@ -330,9 +481,39 @@ pub trait Keychain: Sync + Send + Clone {
 mod test {
 	use rand::thread_rng;
 
-	use types::BlindingFactor;
-	use util::secp::key::{SecretKey, ZERO_KEY};
-	use util::secp::Secp256k1;
+	use crate::types::{BlindingFactor, ExtKeychainPath, Identifier};
+	use crate::util::secp::constants::SECRET_KEY_SIZE;
+	use crate::util::secp::key::{SecretKey, ZERO_KEY};
+	use crate::util::secp::Secp256k1;
+	use std::slice::from_raw_parts;
+
+	// This tests cleaning of BlindingFactor (e.g. secret key) on Drop.
+	// To make this test fail, just remove `Zeroize` derive from `BlindingFactor` definition.
+	#[test]
+	fn blinding_factor_clear_on_drop() {
+		// Create buffer for blinding factor filled with non-zero bytes.
+		let bf_bytes = [0xAA; SECRET_KEY_SIZE];
+		let ptr = {
+			// Fill blinding factor with some "sensitive" data
+			let bf = BlindingFactor::from_slice(&bf_bytes[..]);
+			bf.0.as_ptr()
+
+			// -- after this line BlindingFactor should be zeroed
+		};
+
+		// Unsafely get data from where BlindingFactor was in memory. Should be all zeros.
+		let bf_bytes = unsafe { from_raw_parts(ptr, SECRET_KEY_SIZE) };
+
+		// There should be all zeroes.
+		let mut all_zeros = true;
+		for b in bf_bytes {
+			if *b != 0x00 {
+				all_zeros = false;
+			}
+		}
+
+		assert!(all_zeros)
+	}
 
 	#[test]
 	fn split_blinding_factor() {
@@ -360,5 +541,35 @@ mod test {
 		let _ = skey_out.add_assign(&secp, &skey_zero).unwrap();
 
 		assert_eq!(skey_in, skey_out);
+	}
+
+	// Check path identifiers
+	#[test]
+	fn path_identifier() {
+		let path = ExtKeychainPath::new(4, 1, 2, 3, 4);
+		let id = Identifier::from_path(&path);
+		let ret_path = id.to_path();
+		assert_eq!(path, ret_path);
+
+		let path = ExtKeychainPath::new(
+			1,
+			<u32>::max_value(),
+			<u32>::max_value(),
+			3,
+			<u32>::max_value(),
+		);
+		let id = Identifier::from_path(&path);
+		let ret_path = id.to_path();
+		assert_eq!(path, ret_path);
+
+		println!("id: {:?}", id);
+		println!("ret_path {:?}", ret_path);
+
+		let path = ExtKeychainPath::new(3, 0, 0, 10, 0);
+		let id = Identifier::from_path(&path);
+		let parent_id = id.parent_path();
+		let expected_path = ExtKeychainPath::new(2, 0, 0, 0, 0);
+		let expected_id = Identifier::from_path(&expected_path);
+		assert_eq!(expected_id, parent_id);
 	}
 }

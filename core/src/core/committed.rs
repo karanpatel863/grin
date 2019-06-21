@@ -14,23 +14,28 @@
 
 //! The Committed trait and associated errors.
 
-use keychain;
-use keychain::BlindingFactor;
+use crate::keychain;
+use crate::keychain::BlindingFactor;
 
-use util::secp::key::SecretKey;
-use util::secp::pedersen::Commitment;
-use util::{secp, secp_static, static_secp_instance};
+use crate::util::secp::key::SecretKey;
+use crate::util::secp::pedersen::Commitment;
+use crate::util::{secp, secp_static, static_secp_instance};
+use failure::Fail;
 
 /// Errors from summing and verifying kernel excesses via committed trait.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Fail, Serialize, Deserialize)]
 pub enum Error {
 	/// Keychain related error.
+	#[fail(display = "Keychain error {}", _0)]
 	Keychain(keychain::Error),
 	/// Secp related error.
+	#[fail(display = "Secp error {}", _0)]
 	Secp(secp::Error),
 	/// Kernel sums do not equal output sums.
+	#[fail(display = "Kernel sum mismatch")]
 	KernelSumMismatch,
 	/// Committed overage (fee or reward) is invalid
+	#[fail(display = "Invalid value")]
 	InvalidValue,
 }
 
@@ -66,7 +71,7 @@ pub trait Committed {
 		// commit to zero built from the offset
 		let kernel_sum_plus_offset = {
 			let secp = static_secp_instance();
-			let secp = secp.lock().unwrap();
+			let secp = secp.lock();
 			let mut commits = vec![kernel_sum];
 			if *offset != BlindingFactor::zero() {
 				let key = offset.secret_key(&secp)?;
@@ -90,7 +95,7 @@ pub trait Committed {
 		if overage != 0 {
 			let over_commit = {
 				let secp = static_secp_instance();
-				let secp = secp.lock().unwrap();
+				let secp = secp.lock();
 				let overage_abs = overage.checked_abs().ok_or_else(|| Error::InvalidValue)? as u64;
 				secp.commit_value(overage_abs).unwrap()
 			};
@@ -144,7 +149,7 @@ pub fn sum_commits(
 	positive.retain(|x| *x != zero_commit);
 	negative.retain(|x| *x != zero_commit);
 	let secp = static_secp_instance();
-	let secp = secp.lock().unwrap();
+	let secp = secp.lock();
 	Ok(secp.commit_sum(positive, negative)?)
 }
 
@@ -156,7 +161,7 @@ pub fn sum_kernel_offsets(
 	negative: Vec<BlindingFactor>,
 ) -> Result<BlindingFactor, Error> {
 	let secp = static_secp_instance();
-	let secp = secp.lock().unwrap();
+	let secp = secp.lock();
 	let positive = to_secrets(positive, &secp);
 	let negative = to_secrets(negative, &secp);
 

@@ -16,79 +16,82 @@
 /// scheme.
 use rand::distributions::Alphanumeric;
 use rand::{thread_rng, Rng};
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
 
-use blake2;
+use crate::blake2;
 
-use extkey;
-use types::{BlindSum, BlindingFactor, Error, Identifier, Keychain};
-use util::logger::LOGGER;
-use util::secp::key::SecretKey;
-use util::secp::pedersen::Commitment;
-use util::secp::{self, Message, Secp256k1, Signature};
+use crate::extkey_bip32::{BIP32GrinHasher, ExtendedPrivKey};
+use crate::types::{BlindSum, BlindingFactor, Error, ExtKeychainPath, Identifier, Keychain};
+use crate::util::secp::key::SecretKey;
+use crate::util::secp::pedersen::Commitment;
+use crate::util::secp::{self, Message, Secp256k1, Signature};
 
 #[derive(Clone, Debug)]
 pub struct ExtKeychain {
 	secp: Secp256k1,
-	extkey: extkey::ExtendedKey,
-	key_overrides: HashMap<Identifier, SecretKey>,
-	key_derivation_cache: Arc<RwLock<HashMap<Identifier, u32>>>,
+	master: ExtendedPrivKey,
+	use_switch_commits: bool,
+	hasher: BIP32GrinHasher,
 }
 
 impl Keychain for ExtKeychain {
-	fn from_seed(seed: &[u8]) -> Result<ExtKeychain, Error> {
+	fn from_seed(seed: &[u8], is_floo: bool) -> Result<ExtKeychain, Error> {
+		let mut h = BIP32GrinHasher::new(is_floo);
 		let secp = secp::Secp256k1::with_caps(secp::ContextFlag::Commit);
-		let extkey = extkey::ExtendedKey::from_seed(&secp, seed)?;
+		let master = ExtendedPrivKey::new_master(&secp, &mut h, seed)?;
 		let keychain = ExtKeychain {
 			secp: secp,
-			extkey: extkey,
-			key_overrides: HashMap::new(),
-			key_derivation_cache: Arc::new(RwLock::new(HashMap::new())),
+			master: master,
+			use_switch_commits: true,
+			hasher: h,
+		};
+		Ok(keychain)
+	}
+
+	fn from_mnemonic(word_list: &str, extension_word: &str, is_floo: bool) -> Result<Self, Error> {
+		let secp = secp::Secp256k1::with_caps(secp::ContextFlag::Commit);
+		let h = BIP32GrinHasher::new(is_floo);
+		let master = ExtendedPrivKey::from_mnemonic(&secp, word_list, extension_word, is_floo)?;
+		let keychain = ExtKeychain {
+			secp: secp,
+			master: master,
+			use_switch_commits: true,
+			hasher: h,
 		};
 		Ok(keychain)
 	}
 
 	/// For testing - probably not a good idea to use outside of tests.
-	fn from_random_seed() -> Result<ExtKeychain, Error> {
+	fn from_random_seed(is_floo: bool) -> Result<ExtKeychain, Error> {
 		let seed: String = thread_rng().sample_iter(&Alphanumeric).take(16).collect();
 		let seed = blake2::blake2b::blake2b(32, &[], seed.as_bytes());
-		ExtKeychain::from_seed(seed.as_bytes())
+		ExtKeychain::from_seed(seed.as_bytes(), is_floo)
 	}
 
-	fn root_key_id(&self) -> Identifier {
-		self.extkey.root_key_id.clone()
+	fn root_key_id() -> Identifier {
+		ExtKeychainPath::new(0, 0, 0, 0, 0).to_identifier()
 	}
 
-	fn derive_key_id(&self, derivation: u32) -> Result<Identifier, Error> {
-		let child_key = self.extkey.derive(&self.secp, derivation)?;
-		Ok(child_key.key_id)
+	fn derive_key_id(depth: u8, d1: u32, d2: u32, d3: u32, d4: u32) -> Identifier {
+		ExtKeychainPath::new(depth, d1, d2, d3, d4).to_identifier()
 	}
 
-	fn derived_key(&self, key_id: &Identifier) -> Result<SecretKey, Error> {
-		// first check our overrides and just return the key if we have one in there
-		if let Some(key) = self.key_overrides.get(key_id) {
-			trace!(
-				LOGGER,
-				"... Derived Key (using override) key_id: {}",
-				key_id
-			);
-			return Ok(*key);
+	fn derive_key(&self, amount: u64, id: &Identifier) -> Result<SecretKey, Error> {
+		let mut h = self.hasher.clone();
+		let p = id.to_path();
+		let mut ext_key = self.master;
+		for i in 0..p.depth {
+			ext_key = ext_key.ckd_priv(&self.secp, &mut h, p.path[i as usize])?;
 		}
 
-		let child_key = self.derived_child_key(key_id)?;
-		Ok(child_key.key)
+		match self.use_switch_commits {
+			true => Ok(self.secp.blind_switch(amount, ext_key.secret_key)?),
+			false => Ok(ext_key.secret_key),
+		}
 	}
 
-	fn commit(&self, amount: u64, key_id: &Identifier) -> Result<Commitment, Error> {
-		let skey = self.derived_key(key_id)?;
-		let commit = self.secp.commit(amount, skey)?;
-		Ok(commit)
-	}
-
-	fn commit_with_key_index(&self, amount: u64, derivation: u32) -> Result<Commitment, Error> {
-		let child_key = self.derived_key_from_index(derivation)?;
-		let commit = self.secp.commit(amount, child_key.key)?;
+	fn commit(&self, amount: u64, id: &Identifier) -> Result<Commitment, Error> {
+		let key = self.derive_key(amount, id)?;
+		let commit = self.secp.commit(amount, key)?;
 		Ok(commit)
 	}
 
@@ -96,13 +99,27 @@ impl Keychain for ExtKeychain {
 		let mut pos_keys: Vec<SecretKey> = blind_sum
 			.positive_key_ids
 			.iter()
-			.filter_map(|k| self.derived_key(&k).ok())
+			.filter_map(|k| {
+				let res = self.derive_key(k.value, &Identifier::from_path(&k.ext_keychain_path));
+				if let Ok(s) = res {
+					Some(s)
+				} else {
+					None
+				}
+			})
 			.collect();
 
 		let mut neg_keys: Vec<SecretKey> = blind_sum
 			.negative_key_ids
 			.iter()
-			.filter_map(|k| self.derived_key(&k).ok())
+			.filter_map(|k| {
+				let res = self.derive_key(k.value, &Identifier::from_path(&k.ext_keychain_path));
+				if let Ok(s) = res {
+					Some(s)
+				} else {
+					None
+				}
+			})
 			.collect();
 
 		pos_keys.extend(
@@ -125,8 +142,17 @@ impl Keychain for ExtKeychain {
 		Ok(BlindingFactor::from_secret_key(sum))
 	}
 
-	fn sign(&self, msg: &Message, key_id: &Identifier) -> Result<Signature, Error> {
-		let skey = self.derived_key(key_id)?;
+	fn create_nonce(&self, commit: &Commitment) -> Result<SecretKey, Error> {
+		// hash(commit|wallet root secret key (m)) as nonce
+		let root_key = self.derive_key(0, &Self::root_key_id())?;
+		let res = blake2::blake2b::blake2b(32, &commit.0, &root_key.0[..]);
+		let res = res.as_bytes();
+		SecretKey::from_slice(&self.secp, &res)
+			.map_err(|e| Error::RangeProof(format!("Unable to create nonce: {:?}", e).to_string()))
+	}
+
+	fn sign(&self, msg: &Message, amount: u64, id: &Identifier) -> Result<Signature, Error> {
+		let skey = self.derive_key(amount, id)?;
 		let sig = self.secp.sign(msg, &skey)?;
 		Ok(sig)
 	}
@@ -141,97 +167,29 @@ impl Keychain for ExtKeychain {
 		Ok(sig)
 	}
 
+	fn set_use_switch_commits(&mut self, value: bool) {
+		self.use_switch_commits = value;
+	}
+
 	fn secp(&self) -> &Secp256k1 {
 		&self.secp
 	}
 }
 
-impl ExtKeychain {
-	// For tests and burn only, associate a key identifier with a known secret key.
-	pub fn burn_enabled(keychain: &ExtKeychain, burn_key_id: &Identifier) -> ExtKeychain {
-		let mut key_overrides = HashMap::new();
-		key_overrides.insert(
-			burn_key_id.clone(),
-			SecretKey::from_slice(&keychain.secp, &[1; 32]).unwrap(),
-		);
-		ExtKeychain {
-			key_overrides: key_overrides,
-			..keychain.clone()
-		}
-	}
-
-	fn derived_child_key(&self, key_id: &Identifier) -> Result<extkey::ChildKey, Error> {
-		trace!(LOGGER, "Derived Key by key_id: {}", key_id);
-
-		// then check the derivation cache to see if we have previously derived this key
-		// if so use the derivation from the cache to derive the key
-		{
-			let cache = self.key_derivation_cache.read().unwrap();
-			if let Some(derivation) = cache.get(key_id) {
-				trace!(
-					LOGGER,
-					"... Derived Key (cache hit) key_id: {}, derivation: {}",
-					key_id,
-					derivation
-				);
-				return Ok(self.derived_key_from_index(*derivation)?);
-			}
-		}
-
-		// otherwise iterate over a large number of derivations looking for our key
-		// cache the resulting derivations by key_id for faster lookup later
-		// TODO - remove hard limit (within reason)
-		// TODO - do we benefit here if we track our max known n_child?
-		{
-			let mut cache = self.key_derivation_cache.write().unwrap();
-			for i in 1..100_000 {
-				let child_key = self.extkey.derive(&self.secp, i)?;
-				// let child_key_id = extkey.identifier(&self.secp)?;
-
-				if !cache.contains_key(&child_key.key_id) {
-					trace!(
-						LOGGER,
-						"... Derived Key (cache miss) key_id: {}, derivation: {}",
-						child_key.key_id,
-						child_key.n_child,
-					);
-					cache.insert(child_key.key_id.clone(), child_key.n_child);
-				}
-
-				if child_key.key_id == *key_id {
-					return Ok(child_key);
-				}
-			}
-		}
-
-		Err(Error::KeyDerivation(format!(
-			"failed to derive child_key for {:?}",
-			key_id
-		)))
-	}
-
-	// if we know the derivation index we can just straight to deriving the key
-	fn derived_key_from_index(&self, derivation: u32) -> Result<extkey::ChildKey, Error> {
-		trace!(LOGGER, "Derived Key (fast) by derivation: {}", derivation);
-		let child_key = self.extkey.derive(&self.secp, derivation)?;
-		return Ok(child_key);
-	}
-}
-
 #[cfg(test)]
 mod test {
-	use keychain::ExtKeychain;
-	use types::{BlindSum, BlindingFactor, Keychain};
-	use util::secp;
-	use util::secp::key::SecretKey;
+	use crate::keychain::ExtKeychain;
+	use crate::types::{BlindSum, BlindingFactor, ExtKeychainPath, Keychain};
+	use crate::util::secp;
+	use crate::util::secp::key::SecretKey;
 
 	#[test]
 	fn test_key_derivation() {
-		let keychain = ExtKeychain::from_random_seed().unwrap();
+		let keychain = ExtKeychain::from_random_seed(false).unwrap();
 		let secp = keychain.secp();
 
-		// use the keychain to derive a "key_id" based on the underlying seed
-		let key_id = keychain.derive_key_id(1).unwrap();
+		let path = ExtKeychainPath::new(1, 1, 0, 0, 0);
+		let key_id = path.to_identifier();
 
 		let msg_bytes = [0; 32];
 		let msg = secp::Message::from_slice(&msg_bytes[..]).unwrap();
@@ -241,7 +199,7 @@ mod test {
 		let commit = keychain.commit(0, &key_id).unwrap();
 
 		// now check we can use our key to verify a signature from this zero commitment
-		let sig = keychain.sign(&msg, &key_id).unwrap();
+		let sig = keychain.sign(&msg, 0, &key_id).unwrap();
 		secp.verify_from_commit(&msg, &sig, &commit).unwrap();
 	}
 
@@ -251,7 +209,7 @@ mod test {
 	// and summing the keys used to commit to 0 have the same result.
 	#[test]
 	fn secret_key_addition() {
-		let keychain = ExtKeychain::from_random_seed().unwrap();
+		let keychain = ExtKeychain::from_random_seed(false).unwrap();
 
 		let skey1 = SecretKey::from_slice(
 			&keychain.secp,
@@ -259,7 +217,8 @@ mod test {
 				0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 				0, 0, 0, 1,
 			],
-		).unwrap();
+		)
+		.unwrap();
 
 		let skey2 = SecretKey::from_slice(
 			&keychain.secp,
@@ -267,7 +226,8 @@ mod test {
 				0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 				0, 0, 0, 2,
 			],
-		).unwrap();
+		)
+		.unwrap();
 
 		// adding secret keys 1 and 2 to give secret key 3
 		let mut skey3 = skey1.clone();
@@ -296,7 +256,8 @@ mod test {
 					&BlindSum::new()
 						.add_blinding_factor(BlindingFactor::from_secret_key(skey1))
 						.add_blinding_factor(BlindingFactor::from_secret_key(skey2))
-				).unwrap(),
+				)
+				.unwrap(),
 			BlindingFactor::from_secret_key(skey3),
 		);
 	}

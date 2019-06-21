@@ -17,69 +17,71 @@
 
 use chrono::prelude::{DateTime, Utc};
 
-use core::consensus;
-use core::core::committed;
-use core::core::hash::Hash;
-use core::core::transaction::{self, Transaction};
-use core::core::{BlockHeader, BlockSums};
-use keychain;
+use self::core::core::block;
+use self::core::core::committed;
+use self::core::core::hash::Hash;
+use self::core::core::transaction::{self, Transaction};
+use self::core::core::{BlockHeader, BlockSums};
+use self::core::{consensus, global};
+use failure::Fail;
+use grin_core as core;
+use grin_keychain as keychain;
 
-/// Dandelion relay timer
-const DANDELION_RELAY_SECS: u64 = 600;
+/// Dandelion "epoch" length.
+const DANDELION_EPOCH_SECS: u16 = 600;
 
-/// Dandelion embargo timer
-const DANDELION_EMBARGO_SECS: u64 = 180;
+/// Dandelion embargo timer.
+const DANDELION_EMBARGO_SECS: u16 = 180;
 
-/// Dandelion patience timer
-const DANDELION_PATIENCE_SECS: u64 = 10;
+/// Dandelion aggregation timer.
+const DANDELION_AGGREGATION_SECS: u16 = 30;
 
 /// Dandelion stem probability (stem 90% of the time, fluff 10%).
-const DANDELION_STEM_PROBABILITY: usize = 90;
+const DANDELION_STEM_PROBABILITY: u8 = 90;
 
 /// Configuration for "Dandelion".
 /// Note: shared between p2p and pool.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DandelionConfig {
-	/// Choose new Dandelion relay peer every n secs.
-	#[serde = "default_dandelion_relay_secs"]
-	pub relay_secs: Option<u64>,
-	/// Dandelion embargo, fluff and broadcast tx if not seen on network before
-	/// embargo expires.
-	#[serde = "default_dandelion_embargo_secs"]
-	pub embargo_secs: Option<u64>,
-	/// Dandelion patience timer, fluff/stem processing runs every n secs.
-	/// Tx aggregation happens on stem txs received within this window.
-	#[serde = "default_dandelion_patience_secs"]
-	pub patience_secs: Option<u64>,
+	/// Length of each "epoch".
+	#[serde(default = "default_dandelion_epoch_secs")]
+	pub epoch_secs: Option<u16>,
+	/// Dandelion embargo timer. Fluff and broadcast individual txs if not seen
+	/// on network before embargo expires.
+	#[serde(default = "default_dandelion_embargo_secs")]
+	pub embargo_secs: Option<u16>,
+	/// Dandelion aggregation timer.
+	#[serde(default = "default_dandelion_aggregation_secs")]
+	pub aggregation_secs: Option<u16>,
 	/// Dandelion stem probability (stem 90% of the time, fluff 10% etc.)
-	#[serde = "default_dandelion_stem_probability"]
-	pub stem_probability: Option<usize>,
+	#[serde(default = "default_dandelion_stem_probability")]
+	pub stem_probability: Option<u8>,
 }
 
 impl Default for DandelionConfig {
 	fn default() -> DandelionConfig {
 		DandelionConfig {
-			relay_secs: default_dandelion_relay_secs(),
+			epoch_secs: default_dandelion_epoch_secs(),
 			embargo_secs: default_dandelion_embargo_secs(),
-			patience_secs: default_dandelion_patience_secs(),
+			aggregation_secs: default_dandelion_aggregation_secs(),
 			stem_probability: default_dandelion_stem_probability(),
 		}
 	}
 }
 
-fn default_dandelion_relay_secs() -> Option<u64> {
-	Some(DANDELION_RELAY_SECS)
+fn default_dandelion_epoch_secs() -> Option<u16> {
+	Some(DANDELION_EPOCH_SECS)
 }
 
-fn default_dandelion_embargo_secs() -> Option<u64> {
+fn default_dandelion_embargo_secs() -> Option<u16> {
 	Some(DANDELION_EMBARGO_SECS)
 }
 
-fn default_dandelion_patience_secs() -> Option<u64> {
-	Some(DANDELION_PATIENCE_SECS)
+fn default_dandelion_aggregation_secs() -> Option<u16> {
+	Some(DANDELION_AGGREGATION_SECS)
 }
 
-fn default_dandelion_stem_probability() -> Option<usize> {
+fn default_dandelion_stem_probability() -> Option<u8> {
 	Some(DANDELION_STEM_PROBABILITY)
 }
 
@@ -95,6 +97,16 @@ pub struct PoolConfig {
 	/// Maximum capacity of the pool in number of transactions
 	#[serde = "default_max_pool_size"]
 	pub max_pool_size: usize,
+
+	/// Maximum capacity of the pool in number of transactions
+	#[serde = "default_max_stempool_size"]
+	pub max_stempool_size: usize,
+
+	/// Maximum total weight of transactions that can get selected to build a
+	/// block from. Allows miners to restrict the maximum weight of their
+	/// blocks.
+	#[serde = "default_mineable_max_weight"]
+	pub mineable_max_weight: usize,
 }
 
 impl Default for PoolConfig {
@@ -102,6 +114,8 @@ impl Default for PoolConfig {
 		PoolConfig {
 			accept_fee_base: default_accept_fee_base(),
 			max_pool_size: default_max_pool_size(),
+			max_stempool_size: default_max_stempool_size(),
+			mineable_max_weight: default_mineable_max_weight(),
 		}
 	}
 }
@@ -112,34 +126,23 @@ fn default_accept_fee_base() -> u64 {
 fn default_max_pool_size() -> usize {
 	50_000
 }
+fn default_max_stempool_size() -> usize {
+	50_000
+}
+fn default_mineable_max_weight() -> usize {
+	global::max_block_weight()
+}
 
 /// Represents a single entry in the pool.
 /// A single (possibly aggregated) transaction.
 #[derive(Clone, Debug)]
 pub struct PoolEntry {
-	/// The state of the pool entry.
-	pub state: PoolEntryState,
 	/// Info on where this tx originated from.
 	pub src: TxSource,
 	/// Timestamp of when this tx was originally added to the pool.
 	pub tx_at: DateTime<Utc>,
 	/// The transaction itself.
 	pub tx: Transaction,
-}
-
-/// The possible states a pool entry can be in.
-#[derive(Clone, Debug, PartialEq)]
-pub enum PoolEntryState {
-	/// A new entry, not yet processed.
-	Fresh,
-	/// Tx to be included in the next "stem" run.
-	ToStem,
-	/// Tx previously "stemmed" and propagated.
-	Stemmed,
-	/// Tx to be included in the next "fluff" run.
-	ToFluff,
-	/// Tx previously "fluffed" and broadcast.
-	Fluffed,
 }
 
 /// Placeholder: the data representing where we heard about a tx from.
@@ -159,36 +162,56 @@ pub struct TxSource {
 }
 
 /// Possible errors when interacting with the transaction pool.
-#[derive(Debug)]
+#[derive(Debug, Fail, PartialEq)]
 pub enum PoolError {
 	/// An invalid pool entry caused by underlying tx validation error
+	#[fail(display = "Invalid Tx {}", _0)]
 	InvalidTx(transaction::Error),
+	/// An invalid pool entry caused by underlying block validation error
+	#[fail(display = "Invalid Block {}", _0)]
+	InvalidBlock(block::Error),
 	/// Underlying keychain error.
+	#[fail(display = "Keychain error {}", _0)]
 	Keychain(keychain::Error),
 	/// Underlying "committed" error.
+	#[fail(display = "Committed error {}", _0)]
 	Committed(committed::Error),
 	/// Attempt to add a transaction to the pool with lock_height
 	/// greater than height of current block
+	#[fail(display = "Immature transaction")]
 	ImmatureTransaction,
 	/// Attempt to spend a coinbase output before it has sufficiently matured.
+	#[fail(display = "Immature coinbase")]
 	ImmatureCoinbase,
 	/// Problem propagating a stem tx to the next Dandelion relay node.
+	#[fail(display = "Dandelion error")]
 	DandelionError,
 	/// Transaction pool is over capacity, can't accept more transactions
+	#[fail(display = "Over capacity")]
 	OverCapacity,
 	/// Transaction fee is too low given its weight
+	#[fail(display = "Low fee transaction {}", _0)]
 	LowFeeTransaction(u64),
 	/// Attempt to add a duplicate output to the pool.
+	#[fail(display = "Duplicate commitment")]
 	DuplicateCommitment,
 	/// Attempt to add a duplicate tx to the pool.
+	#[fail(display = "Duplicate tx")]
 	DuplicateTx,
 	/// Other kinds of error (not yet pulled out into meaningful errors).
+	#[fail(display = "General pool error {}", _0)]
 	Other(String),
 }
 
 impl From<transaction::Error> for PoolError {
 	fn from(e: transaction::Error) -> PoolError {
 		PoolError::InvalidTx(e)
+	}
+}
+
+impl From<block::Error> for PoolError {
+	fn from(e: block::Error) -> PoolError {
+		PoolError::InvalidBlock(e)
 	}
 }
 
@@ -226,12 +249,10 @@ pub trait BlockChain: Sync + Send {
 /// downstream processing of valid transactions by the rest of the system, most
 /// importantly the broadcasting of transactions to our peers.
 pub trait PoolAdapter: Send + Sync {
-	/// The transaction pool has accepted this transactions as valid and added
-	/// it to its internal cache.
+	/// The transaction pool has accepted this transaction as valid.
 	fn tx_accepted(&self, tx: &transaction::Transaction);
-	/// The stem transaction pool has accepted this transactions as valid and
-	/// added it to its internal cache, we have waited for the "patience" timer
-	/// to fire and we now want to propagate the tx to the next Dandelion relay.
+
+	/// The stem transaction pool has accepted this transactions as valid.
 	fn stem_tx_accepted(&self, tx: &transaction::Transaction) -> Result<(), PoolError>;
 }
 
@@ -240,9 +261,8 @@ pub trait PoolAdapter: Send + Sync {
 pub struct NoopAdapter {}
 
 impl PoolAdapter for NoopAdapter {
-	fn tx_accepted(&self, _: &transaction::Transaction) {}
-
-	fn stem_tx_accepted(&self, _: &transaction::Transaction) -> Result<(), PoolError> {
+	fn tx_accepted(&self, _tx: &transaction::Transaction) {}
+	fn stem_tx_accepted(&self, _tx: &transaction::Transaction) -> Result<(), PoolError> {
 		Ok(())
 	}
 }

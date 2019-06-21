@@ -18,12 +18,13 @@
 //! To use it, just have your service(s) implement the ApiEndpoint trait and
 //! register them on a ApiServer.
 
+use crate::router::{Handler, HandlerObj, ResponseFuture, Router};
+use crate::web::response;
 use failure::{Backtrace, Context, Fail, ResultExt};
 use futures::sync::oneshot;
 use futures::Stream;
 use hyper::rt::Future;
-use hyper::{rt, Body, Request, Server};
-use router::{Handler, HandlerObj, ResponseFuture, Router};
+use hyper::{rt, Body, Request, Server, StatusCode};
 use rustls;
 use rustls::internal::pemfile;
 use std::fmt::{self, Display};
@@ -33,7 +34,6 @@ use std::sync::Arc;
 use std::{io, thread};
 use tokio_rustls::ServerConfigExt;
 use tokio_tcp;
-use util::LOGGER;
 
 /// Errors that can be returned by an ApiEndpoint implementation.
 #[derive(Debug)]
@@ -56,7 +56,7 @@ pub enum ErrorKind {
 }
 
 impl Fail for Error {
-	fn cause(&self) -> Option<&Fail> {
+	fn cause(&self) -> Option<&dyn Fail> {
 		self.inner.cause()
 	}
 
@@ -66,7 +66,7 @@ impl Fail for Error {
 }
 
 impl Display for Error {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		Display::fmt(&self.inner, f)
 	}
 }
@@ -92,9 +92,10 @@ impl From<Context<ErrorKind>> for Error {
 }
 
 /// TLS config
+#[derive(Clone)]
 pub struct TLSConfig {
-	certificate: String,
-	private_key: String,
+	pub certificate: String,
+	pub private_key: String,
 }
 
 impl TLSConfig {
@@ -191,12 +192,13 @@ impl ApiServer {
 			.spawn(move || {
 				let server = Server::bind(&addr)
 					.serve(router)
-					// TODO graceful shutdown is unstable, investigate 
+					// TODO graceful shutdown is unstable, investigate
 					//.with_graceful_shutdown(rx)
 					.map_err(|e| eprintln!("HTTP API server error: {}", e));
 
 				rt::run(server);
-			}).map_err(|_| ErrorKind::Internal("failed to spawn API thread".to_string()).into())
+			})
+			.map_err(|_| ErrorKind::Internal("failed to spawn API thread".to_string()).into())
 	}
 
 	/// Starts the TLS ApiServer at the provided address.
@@ -225,16 +227,18 @@ impl ApiServer {
 					.then(|r| match r {
 						Ok(x) => Ok::<_, io::Error>(Some(x)),
 						Err(e) => {
-							eprintln!("accept_async failed");
-							Err(e)
+							error!("accept_async failed: {}", e);
+							Ok(None)
 						}
-					}).filter_map(|x| x);
+					})
+					.filter_map(|x| x);
 				let server = Server::builder(tls)
 					.serve(router)
 					.map_err(|e| eprintln!("HTTP API server error: {}", e));
 
 				rt::run(server);
-			}).map_err(|_| ErrorKind::Internal("failed to spawn API thread".to_string()).into())
+			})
+			.map_err(|_| ErrorKind::Internal("failed to spawn API thread".to_string()).into())
 	}
 
 	/// Stops the API server, it panics in case of error
@@ -243,13 +247,10 @@ impl ApiServer {
 			// TODO re-enable stop after investigation
 			//let tx = mem::replace(&mut self.shutdown_sender, None).unwrap();
 			//tx.send(()).expect("Failed to stop API server");
-			info!(LOGGER, "API server has been stoped");
+			info!("API server has been stoped");
 			true
 		} else {
-			error!(
-				LOGGER,
-				"Can't stop API server, it's not running or doesn't spport stop operation"
-			);
+			error!("Can't stop API server, it's not running or doesn't spport stop operation");
 			false
 		}
 	}
@@ -261,9 +262,12 @@ impl Handler for LoggingMiddleware {
 	fn call(
 		&self,
 		req: Request<Body>,
-		mut handlers: Box<Iterator<Item = HandlerObj>>,
+		mut handlers: Box<dyn Iterator<Item = HandlerObj>>,
 	) -> ResponseFuture {
-		debug!(LOGGER, "REST call: {} {}", req.method(), req.uri().path());
-		handlers.next().unwrap().call(req, handlers)
+		debug!("REST call: {} {}", req.method(), req.uri().path());
+		match handlers.next() {
+			Some(handler) => handler.call(req, handlers),
+			None => response(StatusCode::INTERNAL_SERVER_ERROR, "no handler found"),
+		}
 	}
 }

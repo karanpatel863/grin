@@ -34,6 +34,7 @@ use num;
 #[macro_use]
 mod common;
 pub mod cuckaroo;
+pub mod cuckarood;
 pub mod cuckatoo;
 mod error;
 #[allow(dead_code)]
@@ -49,6 +50,7 @@ use chrono::prelude::{DateTime, NaiveDateTime, Utc};
 pub use self::common::EdgeType;
 pub use self::types::*;
 pub use crate::pow::cuckaroo::{new_cuckaroo_ctx, CuckarooContext};
+pub use crate::pow::cuckarood::{new_cuckarood_ctx, CuckaroodContext};
 pub use crate::pow::cuckatoo::{new_cuckatoo_ctx, CuckatooContext};
 pub use crate::pow::error::Error;
 
@@ -71,6 +73,7 @@ pub fn verify_size(bh: &BlockHeader) -> Result<(), Error> {
 pub fn mine_genesis_block() -> Result<Block, Error> {
 	let mut gen = genesis::genesis_dev();
 	if global::is_user_testing_mode() || global::is_automated_testing_mode() {
+		gen = genesis::genesis_dev();
 		gen.header.timestamp = Utc::now();
 	}
 

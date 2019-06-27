@@ -16,13 +16,16 @@
 //! having to pass them all over the place, but aren't consensus values.
 //! should be used sparingly.
 
-use crate::consensus::HeaderInfo;
 use crate::consensus::{
-	graph_weight, BASE_EDGE_BITS, BLOCK_TIME_SEC, COINBASE_MATURITY, CUT_THROUGH_HORIZON,
-	DAY_HEIGHT, DEFAULT_MIN_EDGE_BITS, DIFFICULTY_ADJUST_WINDOW, INITIAL_DIFFICULTY,
-	MAX_BLOCK_WEIGHT, PROOFSIZE, SECOND_POW_EDGE_BITS, STATE_SYNC_THRESHOLD,
+	graph_weight, valid_header_version, HeaderInfo, BASE_EDGE_BITS, BLOCK_TIME_SEC,
+	COINBASE_MATURITY, CUT_THROUGH_HORIZON, DAY_HEIGHT, DEFAULT_MIN_EDGE_BITS,
+	DIFFICULTY_ADJUST_WINDOW, INITIAL_DIFFICULTY, MAX_BLOCK_WEIGHT, PROOFSIZE,
+	SECOND_POW_EDGE_BITS, STATE_SYNC_THRESHOLD,
 };
-use crate::pow::{self, new_cuckaroo_ctx, new_cuckatoo_ctx, EdgeType, PoWContext};
+use crate::core::block::HeaderVersion;
+use crate::pow::{
+	self, new_cuckaroo_ctx, new_cuckarood_ctx, new_cuckatoo_ctx, EdgeType, PoWContext,
+};
 /// An enum collecting sets of parameters used throughout the
 /// code wherever mining is needed. This should allow for
 /// different sets of parameters for different purposes,
@@ -51,10 +54,7 @@ pub const AUTOMATED_TESTING_COINBASE_MATURITY: u64 = 3;
 pub const USER_TESTING_COINBASE_MATURITY: u64 = 3;
 
 /// Testing cut through horizon in blocks
-pub const AUTOMATED_TESTING_CUT_THROUGH_HORIZON: u32 = 20;
-
-/// Testing cut through horizon in blocks
-pub const USER_TESTING_CUT_THROUGH_HORIZON: u32 = 70;
+pub const TESTING_CUT_THROUGH_HORIZON: u32 = 70;
 
 /// Testing state sync threshold in blocks
 pub const TESTING_STATE_SYNC_THRESHOLD: u32 = 20;
@@ -84,12 +84,6 @@ pub const PEER_EXPIRATION_REMOVE_TIME: i64 = PEER_EXPIRATION_DAYS * 24 * 3600;
 /// Will also remove old blocks and associated data from the database.
 /// For a node configured as "archival_mode = true" only the txhashset will be compacted.
 pub const COMPACTION_CHECK: u64 = DAY_HEIGHT;
-
-/// Automated testing number of blocks to reuse a txhashset zip for.
-pub const AUTOMATED_TESTING_TXHASHSET_ARCHIVE_INTERVAL: u64 = 10;
-
-/// Number of blocks to reuse a txhashset zip for.
-pub const TXHASHSET_ARCHIVE_INTERVAL: u64 = 12 * 60;
 
 /// Types of chain a server can run with, dictates the genesis block and
 /// and mining parameters used.
@@ -153,7 +147,7 @@ pub fn set_mining_mode(mode: ChainTypes) {
 /// Return either a cuckoo context or a cuckatoo context
 /// Single change point
 pub fn create_pow_context<T>(
-	_height: u64,
+	height: u64,
 	edge_bits: u8,
 	proof_size: usize,
 	max_sols: u32,
@@ -163,13 +157,19 @@ where
 {
 	let chain_type = CHAIN_TYPE.read().clone();
 	match chain_type {
-		// Mainnet has Cuckaroo29 for AR and Cuckatoo30+ for AF
-		ChainTypes::Mainnet if edge_bits == 29 => new_cuckaroo_ctx(edge_bits, proof_size),
-		ChainTypes::Mainnet => new_cuckatoo_ctx(edge_bits, proof_size, max_sols),
+		// Mainnet has Cuckaroo(d)29 for AR and Cuckatoo31+ for AF
+		ChainTypes::Mainnet if edge_bits > 29 => new_cuckatoo_ctx(edge_bits, proof_size, max_sols),
+		ChainTypes::Mainnet if valid_header_version(height, HeaderVersion::new(2)) => {
+			new_cuckarood_ctx(edge_bits, proof_size)
+		}
+		ChainTypes::Mainnet => new_cuckaroo_ctx(edge_bits, proof_size),
 
 		// Same for Floonet
-		ChainTypes::Floonet if edge_bits == 29 => new_cuckaroo_ctx(edge_bits, proof_size),
-		ChainTypes::Floonet => new_cuckatoo_ctx(edge_bits, proof_size, max_sols),
+		ChainTypes::Floonet if edge_bits > 29 => new_cuckatoo_ctx(edge_bits, proof_size, max_sols),
+		ChainTypes::Floonet if valid_header_version(height, HeaderVersion::new(2)) => {
+			new_cuckarood_ctx(edge_bits, proof_size)
+		}
+		ChainTypes::Floonet => new_cuckaroo_ctx(edge_bits, proof_size),
 
 		// Everything else is Cuckatoo only
 		_ => new_cuckatoo_ctx(edge_bits, proof_size, max_sols),
@@ -254,8 +254,8 @@ pub fn max_block_weight() -> usize {
 pub fn cut_through_horizon() -> u32 {
 	let param_ref = CHAIN_TYPE.read();
 	match *param_ref {
-		ChainTypes::AutomatedTesting => AUTOMATED_TESTING_CUT_THROUGH_HORIZON,
-		ChainTypes::UserTesting => USER_TESTING_CUT_THROUGH_HORIZON,
+		ChainTypes::AutomatedTesting => TESTING_CUT_THROUGH_HORIZON,
+		ChainTypes::UserTesting => TESTING_CUT_THROUGH_HORIZON,
 		_ => CUT_THROUGH_HORIZON,
 	}
 }
@@ -267,15 +267,6 @@ pub fn state_sync_threshold() -> u32 {
 		ChainTypes::AutomatedTesting => TESTING_STATE_SYNC_THRESHOLD,
 		ChainTypes::UserTesting => TESTING_STATE_SYNC_THRESHOLD,
 		_ => STATE_SYNC_THRESHOLD,
-	}
-}
-
-/// Number of blocks to reuse a txhashset zip for.
-pub fn txhashset_archive_interval() -> u64 {
-	let param_ref = CHAIN_TYPE.read();
-	match *param_ref {
-		ChainTypes::AutomatedTesting => AUTOMATED_TESTING_TXHASHSET_ARCHIVE_INTERVAL,
-		_ => TXHASHSET_ARCHIVE_INTERVAL,
 	}
 }
 

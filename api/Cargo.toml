@@ -27,7 +27,7 @@ tokio-rustls = "0.8"
 http = "0.1.5"
 hyper-rustls = "0.14"
 futures = "0.1.21"
-rustls = "0.13"
+rustls = "0.14"
 url = "1.7.0"
 
 grin_core = { path = "../core", version = "2.0.1-beta.1" }

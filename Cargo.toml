@@ -50,7 +50,7 @@ features = ["win32"]
 cursive = "0.12"
 
 [build-dependencies]
-built = "0.3"
+built = "0.5"
 
 [dev-dependencies]
 grin_chain = { path = "./chain", version = "2.0.1-beta.1" }
